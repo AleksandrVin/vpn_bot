@@ -1,0 +1,26 @@
+services:
+  wireguard:
+    cap_add:
+    - NET_ADMIN
+    - SYS_MODULE
+    container_name: wireguard
+    environment:
+    - PUID=1000
+    - PGID=1000
+    - TZ=Etc/UTC
+    - SERVERPORT=51820
+    - PEERS=admin
+    - PEERDNS=auto
+    - INTERNAL_SUBNET=10.13.13.0
+    - ALLOWEDIPS=0.0.0.0/0
+    - LOG_CONFS=false
+    image: aleksandrvi/wireguard_custom:0.0.0
+    ports:
+    - 51820:51820/udp
+    restart: unless-stopped
+    sysctls:
+    - net.ipv4.conf.all.src_valid_mark=1
+    volumes:
+    - ~/wg_config:/config
+    - /lib/modules:/lib/modules
+version: '2.1'
