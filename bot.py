@@ -64,11 +64,13 @@ async def on_start(message: types.Message):
 async def on_help(message: types.Message):
     help_text = (
         "/start - Initialize user in the system\n"
+        "/register - Register new token\n"
         "/add - Add a new VPN profile\n"
         "/list - List all VPN profiles\n"
         "/delete - Delete a VPN profile\n"
         "/help - Show this help message\n"
         "/get - Get .conf file and qr code for wireguard client application for existing peer\n"
+        "/unregister - Unregister token\n"
     )
     await message.reply(help_text)
 
@@ -94,10 +96,6 @@ async def on_add(message: types.Message):
     if not profile_name:
         await message.reply("Please provide a profile name after the /add command.")
         return
-    
-    # check if user have token with balance > 0
-    cursor.execute(
-        "SELECT token, balance FROM users_tokens WHERE balance > 0")
 
     # Check if the profile already exists for this user_id
     cursor.execute(
@@ -175,7 +173,7 @@ async def on_delete(message: types.Message):
     else:
         await message.reply(f"VPN profile '{escape_md(profile_name)}' not found.", parse_mode=ParseMode.MARKDOWN)
 
-# register user access token
+# regitster token for user
 async def on_register(message: types.Message):
     user_id = message.from_user.id
     token = message.text[10:].strip()
@@ -183,7 +181,58 @@ async def on_register(message: types.Message):
     if not token:
         await message.reply("Please provide the token you want to register after the /register command.")
         return
+    
+    # get token from users database and check if it exists
+    cursor.execute( "SELECT token FROM users WHERE user_id=?", (user_id,))
+    user_token = cursor.fetchone()
 
+    if user_token:
+        await message.reply(f"You already have token: {user_token[0]}")
+        return
+    
+    # check if token is not NONE
+    if token == "NONE":
+        await message.reply(f"Token {token} not found.")
+        return
+    
+    # check if token exists in tokens database
+    cursor.execute( "SELECT token FROM users_tokens WHERE token=?", (token,))
+    token_exists = cursor.fetchone()
+
+    if not token_exists:
+        await message.reply(f"Token {token} not found.")
+        return
+    
+    # add token to users database
+    cursor.execute( "INSERT INTO users (user_id, token) VALUES (?, ?)", (user_id, token))
+    conn.commit()
+
+    # get balance from tokens database
+    cursor.execute( "SELECT balance FROM users_tokens WHERE token=?", (token,))
+    balance = cursor.fetchone()
+
+
+    await message.reply(f"Token {token} registered successfully.")
+    await message.reply(f"Your balance is {balance[0]}")
+
+
+# remove token from user
+async def on_unregister(message: types.Message):
+    user_id = message.from_user.id
+
+    # get token from users database and check if it exists
+    cursor.execute( "SELECT token FROM users WHERE user_id=?", (user_id,))
+    user_token = cursor.fetchone()
+
+    if not user_token:
+        await message.reply("You don't have any token.")
+        return
+    
+    # replace token with None in users database
+    cursor.execute( "UPDATE users SET token = ? WHERE user_id = ?", (None, user_id))
+    conn.commit()
+
+    await message.reply(f"Token {user_token[0]} unregistered successfully.")
 
 dp.register_message_handler(on_start, commands=['start'])
 dp.register_message_handler(on_help, commands=['help'])
@@ -191,6 +240,8 @@ dp.register_message_handler(on_add, commands=['add'])
 dp.register_message_handler(on_list, commands=['list'])
 dp.register_message_handler(on_delete, commands=['delete'])
 dp.register_message_handler(on_get, commands=['get'])
+dp.register_message_handler(on_register, commands=['register'])
+dp.register_message_handler(on_unregister, commands=['unregister'])
 
 # handler for SIGINT and SIGTERM signals
 
