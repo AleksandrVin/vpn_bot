@@ -1,6 +1,7 @@
 # telegram bot for vpn access
 # using aiogram python3 library
-# data is stored in sqlite3 database. 2 tables: users and vpn_profiles (1 user can have multiple vpn profiles)
+# data is stored in sqlite3 database. 
+# 2 tables: users and vpn_profiles (1 user can have multiple vpn profiles)
 # users table: user_id, telegram_id
 # vpn_profiles table: id, user_id, name
 # methods /start /add /list /delete /help
@@ -76,8 +77,10 @@ async def on_help(message: types.Message):
 
 
 async def send_config(message: types.Message, name_for_wg, profile_name):
-    # send the profile to the user form ~/wg_config/ directory. Each profile is a file with name user_id + profile_name \
-    # e.g. 1234567890profile1 and stored in folder ~/wg_config/peer_1234567890profile1/peer_1234567890profile1.conf
+    # send the profile to the user form ~/wg_config/ directory. 
+    # Each profile is a file with name user_id + profile_name \
+    # e.g. 1234567890profile1 and stored in folder 
+    # ~/wg_config/peer_1234567890profile1/peer_1234567890profile1.conf
     file_path = f"~/wg_config/peer_{name_for_wg}/peer_{name_for_wg}.conf"
     qr_code_path = f"~/wg_config/peer_{name_for_wg}/peer_{name_for_wg}.png"
 
@@ -106,7 +109,8 @@ async def on_add(message: types.Message):
     name_for_wg = str(user_id) + profile_name
 
     if profile_exists:
-        await message.reply(f"VPN profile '{escape_md(profile_name)}' already exists.", parse_mode=ParseMode.MARKDOWN)
+        await message.reply(f"VPN profile '{escape_md(profile_name)}' already exists.", 
+                            parse_mode=ParseMode.MARKDOWN)
         await send_config(message, name_for_wg, profile_name)
         return
 
@@ -116,7 +120,8 @@ async def on_add(message: types.Message):
     # run command inside docker container
     os.system(f"docker exec -it wireguard /app/manage-peer add {name_for_wg}")
     conn.commit()
-    await message.reply(f"VPN profile '{escape_md(profile_name)}' added successfully. \n Your .conf file and qr code for wireguard client application", parse_mode=ParseMode.MARKDOWN)
+    await message.reply(f"VPN profile '{escape_md(profile_name)}' added successfully. \n \
+                        Your .conf file and qr code for wireguard client application", parse_mode=ParseMode.MARKDOWN)
     await send_config(message, name_for_wg, profile_name)
 
 

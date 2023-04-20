@@ -27,7 +27,7 @@ def update_balance(token, new_balance):
     conn.commit()
 
 # Define a function to generate a new token with a balance of 0
-def generate_token(balance=0):
+def generate_token(balance):
     token = os.urandom(16).hex()
     c = conn.cursor()
     c.execute('INSERT INTO users_tokens (token, balance) VALUES (?, ?)', (token, balance))
@@ -42,12 +42,12 @@ def list_tokens():
         print(row)
 
 
-usage="Usage: manage_token.py [add|remove|update|generate|list] [token] [amount]"
+USAGE="Usage: manage_token.py [add|remove|update|generate|list] [token] [amount]"
 
 if __name__ == '__main__':
     # if no arguments are passed, print usage
     if len(sys.argv) == 1:
-        print(usage)
+        print(USAGE)
         sys.exit(1)
 
     # if the first argument is list, list all tokens
@@ -57,7 +57,7 @@ if __name__ == '__main__':
 
     # if number of arguments is not 4, print usage
     if len(sys.argv) != 4:
-        print(usage)
+        print(USAGE)
         sys.exit(1)
 
     balance = sys.argv[3]
@@ -82,6 +82,6 @@ if __name__ == '__main__':
         print(generate_token(balance))
     
     else:
-        print(usage)
+        print(USAGE)
         sys.exit(1)
 
