@@ -43,14 +43,15 @@ cursor.execute("""CREATE TABLE IF NOT EXISTS users (
 cursor.execute("""CREATE TABLE IF NOT EXISTS vpn_profiles (
                     id INTEGER PRIMARY KEY,
                     user_id INTEGER,
-                    name TEXT,
+                    name TEXT DEFAULT 'active',
+                    status TEXT,
                     creation_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (user_id) REFERENCES users (user_id))""")
 cursor.execute("""CREATE TABLE IF NOT EXISTS users_tokens (
                     id INTEGER PRIMARY KEY,
                     token TEXT UNIQUE,
                     creation_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    balance INTEGER)""")
+                    balance FLOAT DEFAULT 0)""")
 conn.commit()
 
 
@@ -72,6 +73,10 @@ async def on_help(message: types.Message):
         "/help - Show this help message\n"
         "/get - Get .conf file and qr code for wireguard client application for existing peer\n"
         "/unregister - Unregister token\n"
+        "/info - Show info about your token\n"
+        "/balance - Show balance of your token\n"
+        "/suspend - Suspend VPN profile\n"
+        "/resume - Resume VPN profile\n"
     )
     await message.reply(help_text)
 
@@ -106,7 +111,7 @@ async def on_add(message: types.Message):
     profile_exists = cursor.fetchone()
 
     # name for wg is user_id + profile_name
-    name_for_wg = str(user_id) + profile_name
+    name_for_wg = str(user_id) + 'p' + profile_name
 
     if profile_exists:
         await message.reply(f"VPN profile '{escape_md(profile_name)}' already exists.", 
@@ -151,7 +156,7 @@ async def on_get(message: types.Message):
         return
 
     # name for wg is user_id + profile_name
-    name_for_wg = str(user_id) + profile_name
+    name_for_wg = str(user_id) + 'p' + profile_name
     await send_config(message, name_for_wg, profile_name)
 
 
@@ -168,7 +173,7 @@ async def on_delete(message: types.Message):
     conn.commit()
 
     # name for wg is user_id + profile_name
-    name_for_wg = str(user_id) + profile_name
+    name_for_wg = str(user_id) + 'p' + profile_name
     # run command inside docker container
     os.system(
         f"docker exec -it wireguard /app/manage-peer remove {name_for_wg}")
@@ -239,6 +244,92 @@ async def on_unregister(message: types.Message):
 
     await message.reply(f"Token {user_token[0]} unregistered successfully.")
 
+# get information about token and balance
+async def on_info(message: types.Message):
+    user_id = message.from_user.id
+
+    # get token from users database and check if it exists
+    cursor.execute( "SELECT token FROM users WHERE user_id=?", (user_id,))
+    user_token = cursor.fetchone()
+
+    if not user_token:
+        await message.reply("You don't have any token.")
+        return
+    
+    # get balance from tokens database
+    cursor.execute( "SELECT balance FROM users_tokens WHERE token=?", (user_token[0],))
+    balance = cursor.fetchone()
+
+    await message.reply(f"Your token is {user_token[0]}")
+    await message.reply(f"Your balance is {balance[0]}")
+
+# suspend user vpn profile
+async def on_suspend(message: types.Message):
+    user_id = message.from_user.id
+    profile_name = message.text[9:].strip()
+
+    if not profile_name:
+        await message.reply("Please provide the profile name you want to suspend after the /suspend command.")
+        return
+    
+    # check if this profile exists in vpn profiles database and status is active
+    cursor.execute( "SELECT status FROM vpn_profiles WHERE user_id = ? AND name = ?", (user_id, profile_name))
+    profile_status = cursor.fetchone()
+
+    if not profile_status:
+        await message.reply(f"VPN profile '{escape_md(profile_name)}' not found.", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    if profile_status[0] == "suspended":
+        await message.reply(f"VPN profile '{escape_md(profile_name)}' already suspended.", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    # update status in vpn profiles database
+    cursor.execute( "UPDATE vpn_profiles SET status = ? WHERE user_id = ? AND name = ?", ("suspended", user_id, profile_name))
+    conn.commit()
+
+    # name for wg is user_id + profile_name
+    name_for_wg = str(user_id) + 'p' + profile_name
+
+    # run command inside docker container
+    os.system(
+        f"docker exec -it wireguard /app/manage-peer suspend {name_for_wg}")
+
+    await message.reply(f"VPN profile '{escape_md(profile_name)}' suspended successfully.", parse_mode=ParseMode.MARKDOWN)
+
+# resume user vpn profile
+async def on_resume(message: types.Message):
+    user_id = message.from_user.id
+    profile_name = message.text[8:].strip()
+
+    if not profile_name:
+        await message.reply("Please provide the profile name you want to resume after the /resume command.")
+        return
+    
+    # check if this profile exists in vpn profiles database and status is suspended
+    cursor.execute( "SELECT status FROM vpn_profiles WHERE user_id = ? AND name = ?", (user_id, profile_name))
+    profile_status = cursor.fetchone()
+
+    if not profile_status:
+        await message.reply(f"VPN profile '{escape_md(profile_name)}' not found.", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    if profile_status[0] == "active":
+        await message.reply(f"VPN profile '{escape_md(profile_name)}' already active.", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    # update status in vpn profiles database
+    cursor.execute( "UPDATE vpn_profiles SET status = ? WHERE user_id = ? AND name = ?", ("active", user_id, profile_name))
+    conn.commit()
+
+    # name for wg is user_id + profile_name
+    name_for_wg = str(user_id) + 'p' + profile_name
+
+    # run command inside docker container
+    os.system(f"docker exec -it wireguard /app/manage-peer add {name_for_wg}")
+
+    await message.reply(f"VPN profile '{escape_md(profile_name)}' resumed successfully.", parse_mode=ParseMode.MARKDOWN)
+
 dp.register_message_handler(on_start, commands=['start'])
 dp.register_message_handler(on_help, commands=['help'])
 dp.register_message_handler(on_add, commands=['add'])
@@ -247,9 +338,12 @@ dp.register_message_handler(on_delete, commands=['delete'])
 dp.register_message_handler(on_get, commands=['get'])
 dp.register_message_handler(on_register, commands=['register'])
 dp.register_message_handler(on_unregister, commands=['unregister'])
+dp.register_message_handler(on_info, commands=['info'])
+dp.register_message_handler(on_info, commands=['balance'])
+dp.register_message_handler(on_suspend, commands=['suspend'])
+dp.register_message_handler(on_resume, commands=['resume'])
 
 # handler for SIGINT and SIGTERM signals
-
 
 def signal_handler(sig, frame):
     print('You pressed Ctrl+C!')

@@ -14,7 +14,7 @@ services:
     - INTERNAL_SUBNET=10.13.13.0
     - ALLOWEDIPS=0.0.0.0/0
     - LOG_CONFS=false
-    image: aleksandrvi/wireguard_custom:0.0.0
+    image: aleksandrvi/wireguard_custom:0.1.0
     ports:
     - 51820:51820/udp
     restart: unless-stopped
