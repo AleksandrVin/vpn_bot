@@ -110,6 +110,23 @@ async def on_add(message: types.Message):
         "SELECT * FROM vpn_profiles WHERE user_id = ? AND name = ?", (user_id, profile_name))
     profile_exists = cursor.fetchone()
 
+    # Check if user have token with balance > 0
+    cursor.execute(
+        "SELECT token FROM users WHERE user_id = ?", (user_id,))
+    user_token = cursor.fetchone()
+
+    if not user_token:
+        await message.reply("You don't have any token. Please register token first.")
+        return
+                                    
+    # get balance from tokens database
+    cursor.execute( "SELECT balance FROM users_tokens WHERE token=?", (user_token[0],))
+    balance = cursor.fetchone()
+
+    if balance[0] <= 0:
+        await message.reply("Your balance is 0. Please top up your balance.")
+        return
+
     # name for wg is user_id + profile_name
     name_for_wg = str(user_id) + 'p' + profile_name
 
