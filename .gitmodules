@@ -1,3 +1,0 @@
-[submodule "docker-wireguard"]
-	path = docker-wireguard
-	url = git@github.com:AleksandrVin/docker-wireguard.git

@@ -1,0 +1,75 @@
+#!/usr/bin/with-contenv bash
+
+set -e
+
+# Set variables
+CONFIG_PATH="/config"
+SERVER_CONFIG="$CONFIG_PATH/wg0.conf"
+
+# restore PEERS variable from .donoteditthisfile
+if [ -f "$CONFIG_PATH/.donoteditthisfile" ]; then
+    source "$CONFIG_PATH/.donoteditthisfile"
+    PEERS="$ORIG_PEERS"
+fi
+
+# Check if the command is "add" or "remove"
+if [ "$1" == "add" ]; then
+
+    PEER_NAME="$2"
+
+    # add PEER_NAME to PEERS variable
+    PEERS="${PEERS},${PEER_NAME}"
+
+    # Generate the peer configuration
+    source /etc/s6-overlay/s6-rc.d/init-wireguard-confs/run
+
+    # Restart the WireGuard interface
+    wg syncconf wg0 <(wg-quick strip "$SERVER_CONFIG")
+    echo "Peer $PEER_NAME added successfully."
+
+elif [ "$1" == "remove" ]; then
+
+    PEER_NAME="$2"
+
+    PEER_CONFIG_DIR="$CONFIG_PATH/peer_$PEER_NAME"
+
+    # Check if the peer configuration directory exists
+    if [ ! -d "$PEER_CONFIG_DIR" ]; then
+        echo "Error: Peer dir $PEER_NAME not found."
+        exit 1
+    fi
+
+    # remove PEER_NAME from PEERS variable
+    PEERS="${PEERS//,$PEER_NAME/}"
+
+    # Remove the peer configuration directory
+    rm -r "$PEER_CONFIG_DIR"
+
+    # Generate the peer configuration
+    source /etc/s6-overlay/s6-rc.d/init-wireguard-confs/run
+
+    # Restart the WireGuard interface (optional)
+    wg syncconf wg0 <(wg-quick strip "$SERVER_CONFIG")
+
+    echo "Peer $PEER_NAME removed successfully."
+
+# command suspend. Remove peer from config but don't delete conf files
+elif [ "$1" == "suspend" ]; then
+
+    PEER_NAME="$2"
+
+    # remove PEER_NAME from PEERS variable
+    PEERS="${PEERS//,$PEER_NAME/}"
+
+    # Generate the peer configuration
+    source /etc/s6-overlay/s6-rc.d/init-wireguard-confs/run
+
+    # Restart the WireGuard interface (optional)
+    wg syncconf wg0 <(wg-quick strip "$SERVER_CONFIG")
+
+    echo "Peer $PEER_NAME suspended successfully."
+
+else
+    echo "Usage: $0 {add|remove} peer_name peer_ip peer_port"
+    exit 1
+fi
