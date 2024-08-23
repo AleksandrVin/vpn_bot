@@ -1,67 +1,65 @@
-# telegram bot for vpn access
-# using aiogram python3 library
-# data is stored in sqlite3 database. 
-# 2 tables: users and vpn_profiles (1 user can have multiple vpn profiles)
-# users table: user_id, telegram_id
-# vpn_profiles table: id, user_id, name
-# methods /start /add /list /delete /help
-
-# get telegram bot token from environment variable TELEGRAM_BOT_TOKEN
-import sys
-import signal
-import sqlite3
-from aiogram.utils.markdown import text, escape_md
-from aiogram.utils import executor
-from aiogram.types import ParseMode
-from aiogram.contrib.middlewares.logging import LoggingMiddleware
-from aiogram import Bot, Dispatcher, types
-from aiogram import executor
-import logging
 import os
-import yaml
+import sys
+import asyncio
+import logging
+from aiogram import Bot, Dispatcher, types
+from aiogram.contrib.middlewares.logging import LoggingMiddleware
+from aiogram.contrib.fsm_storage.memory import MemoryStorage
+from aiogram.dispatcher import FSMContext
+from aiogram.dispatcher.filters.state import State, StatesGroup
+from aiogram.types import ParseMode
+from aiogram.utils import executor, markdown
+from sqlmodel import Field, Session, SQLModel, create_engine, select
 
-# check if TELEGRAM_BOT_TOKEN is set
+# Get the Telegram bot token from environment variable
 API_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
-if API_TOKEN is None:
-    print("Please set TELEGRAM_BOT_TOKEN environment variable")
+if not API_TOKEN:
+    print("Please set the TELEGRAM_BOT_TOKEN environment variable")
     sys.exit(1)
 
+# Configure logging
 logging.basicConfig(level=logging.INFO)
 
+# Initialize the bot and dispatcher
 bot = Bot(token=API_TOKEN)
-dp = Dispatcher(bot)
+storage = MemoryStorage()
+dp = Dispatcher(bot, storage=storage)
 dp.middleware.setup(LoggingMiddleware())
 
-# Initialize the database
-conn = sqlite3.connect("vpn_profiles.db")
-cursor = conn.cursor()
+# Define database models using Sqlmodel
+class User(SQLModel, table=True):
+    user_id: int = Field(default=None, primary_key=True)
+    telegram_id: int = Field(unique=True)
+    token: str = Field(default=None)
 
-cursor.execute("""CREATE TABLE IF NOT EXISTS users (
-                    user_id INTEGER PRIMARY KEY,
-                    telegram_id INTEGER UNIQUE,
-                    token TEXT)""")
-cursor.execute("""CREATE TABLE IF NOT EXISTS vpn_profiles (
-                    id INTEGER PRIMARY KEY,
-                    user_id INTEGER,
-                    name TEXT DEFAULT 'active',
-                    status TEXT,
-                    creation_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (user_id) REFERENCES users (user_id))""")
-cursor.execute("""CREATE TABLE IF NOT EXISTS users_tokens (
-                    id INTEGER PRIMARY KEY,
-                    token TEXT UNIQUE,
-                    creation_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    balance FLOAT DEFAULT 0)""")
-conn.commit()
+class VPNProfile(SQLModel, table=True):
+    id: int = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.user_id")
+    name: str = Field(default="active")
+    status: str = Field(default="active")
+    creation_time: str = Field(default=None, nullable=True)
 
+class UserToken(SQLModel, table=True):
+    id: int = Field(default=None, primary_key=True)
+    token: str = Field(unique=True)
+    creation_time: str = Field(default=None, nullable=True)
+    balance: float = Field(default=0)
+
+# Create database engine
+engine = create_engine("sqlite:///vpn_profiles.db")
+SQLModel.metadata.create_all(engine)
+
+# Define FSM states
+class Form(StatesGroup):
+    profile_name = State()  # State to enter profile name
 
 async def on_start(message: types.Message):
     user_id = message.from_user.id
-    cursor.execute(
-        "INSERT OR IGNORE INTO users (telegram_id) VALUES (?)", (user_id,))
-    conn.commit()
+    async with Session(engine) as session:
+        user = User(telegram_id=user_id)
+        session.add(user)
+        await session.commit()
     await message.reply("Welcome to the VPN Access Bot! Use /help for available commands.")
-
 
 async def on_help(message: types.Message):
     help_text = (
@@ -71,7 +69,7 @@ async def on_help(message: types.Message):
         "/list - List all VPN profiles\n"
         "/delete - Delete a VPN profile\n"
         "/help - Show this help message\n"
-        "/get - Get .conf file and qr code for wireguard client application for existing peer\n"
+        "/get - Get .conf file and QR code for WireGuard client application for existing peer\n"
         "/unregister - Unregister token\n"
         "/info - Show info about your token\n"
         "/balance - Show balance of your token\n"
@@ -80,90 +78,82 @@ async def on_help(message: types.Message):
     )
     await message.reply(help_text)
 
-
 async def send_config(message: types.Message, name_for_wg, profile_name):
-    # send the profile to the user form ~/wg_config/ directory. 
-    # Each profile is a file with name user_id + profile_name \
-    # e.g. 1234567890profile1 and stored in folder 
-    # ~/wg_config/peer_1234567890profile1/peer_1234567890profile1.conf
-    file_path = f"~/wg_config/peer_{name_for_wg}/peer_{name_for_wg}.conf"
-    qr_code_path = f"~/wg_config/peer_{name_for_wg}/peer_{name_for_wg}.png"
+    file_path = os.path.expanduser(f"~/wg_config/peer_{name_for_wg}/peer_{name_for_wg}.conf")
+    qr_code_path = os.path.expanduser(f"~/wg_config/peer_{name_for_wg}/peer_{name_for_wg}.png")
 
-    expanded_file_path = os.path.expanduser(file_path)
-    # reply document but replace name for user
-    await message.reply_document(open(expanded_file_path, "rb"), caption=f"{profile_name}.conf")
-    # also send png image with qr code
-    expanded_file_path = os.path.expanduser(qr_code_path)
-    await message.reply_photo(open(expanded_file_path, "rb"), caption=f"{profile_name}.png")
+    await message.reply_document(open(file_path, "rb"), caption=f"{profile_name}.conf")
+    await message.reply_photo(open(qr_code_path, "rb"), caption=f"{profile_name}.png")
 
-
+# Command handler to initiate the process of adding a profile
 async def on_add(message: types.Message):
+    await message.reply("Please enter the profile name:")
+    await Form.profile_name.set()
+
+# Handler to receive the profile name
+@dp.message_handler(state=Form.profile_name)
+async def process_profile_name(message: types.Message, state: FSMContext):
+    profile_name = message.text.strip()
     user_id = message.from_user.id
-    profile_name = message.text[5:].strip()
 
-    if not profile_name:
-        await message.reply("Please provide a profile name after the /add command.")
-        return
+    async with Session(engine) as session:
+        user = await session.exec(select(User).where(User.telegram_id == user_id))
+        user = user.one_or_none()
 
-    # Check if the profile already exists for this user_id
-    cursor.execute(
-        "SELECT * FROM vpn_profiles WHERE user_id = ? AND name = ?", (user_id, profile_name))
-    profile_exists = cursor.fetchone()
+        if not user:
+            await message.reply("User not found. Please use /start to initialize.")
+            await state.finish()
+            return
 
-    # Check if user have token with balance > 0
-    cursor.execute(
-        "SELECT token FROM users WHERE user_id = ?", (user_id,))
-    user_token = cursor.fetchone()
+        profile_exists = await session.exec(select(VPNProfile).where(VPNProfile.user_id == user.user_id, VPNProfile.name == profile_name))
+        profile_exists = profile_exists.one_or_none()
 
-    if not user_token:
-        await message.reply("You don't have any token. Please register token first.")
-        return
-                                    
-    # get balance from tokens database
-    cursor.execute( "SELECT balance FROM users_tokens WHERE token=?", (user_token[0],))
-    balance = cursor.fetchone()
+        if profile_exists:
+            await message.reply(f"VPN profile '{markdown.escape_md(profile_name)}' already exists.", parse_mode=ParseMode.MARKDOWN)
+            await send_config(message, user_id + 'p' + profile_name, profile_name)
+            await state.finish()
+            return
 
-    if balance[0] <= 0:
-        await message.reply("Your balance is 0. Please top up your balance.")
-        return
+        user_token = await session.exec(select(UserToken).where(UserToken.token == user.token))
+        user_token = user_token.one_or_none()
 
-    # name for wg is user_id + profile_name
-    name_for_wg = str(user_id) + 'p' + profile_name
+        if not user_token or user_token.balance <= 0:
+            await message.reply("You don't have a valid token or your balance is zero. Please register a token or top up your balance.")
+            await state.finish()
+            return
 
-    if profile_exists:
-        await message.reply(f"VPN profile '{escape_md(profile_name)}' already exists.", 
-                            parse_mode=ParseMode.MARKDOWN)
-        await send_config(message, name_for_wg, profile_name)
-        return
+        new_profile = VPNProfile(user_id=user.user_id, name=profile_name)
+        session.add(new_profile)
+        await session.commit()
 
-    cursor.execute(
-        "INSERT INTO vpn_profiles (user_id, name) VALUES (?, ?)", (user_id, profile_name))
-
-    # run command inside docker container
-    os.system(f"docker exec -it wireguard /app/manage-peer add {name_for_wg}")
-    conn.commit()
-    await message.reply(f"VPN profile '{escape_md(profile_name)}' added successfully. \n \
-                        Your .conf file and qr code for wireguard client application", parse_mode=ParseMode.MARKDOWN)
-    await send_config(message, name_for_wg, profile_name)
-
+        os.system(f"docker exec -it wireguard /app/manage-peer add {user_id + 'p' + profile_name}")
+        await message.reply(f"VPN profile '{markdown.escape_md(profile_name)}' added successfully. \nYour .conf file and QR code for WireGuard client application.", parse_mode=ParseMode.MARKDOWN)
+        await send_config(message, user_id + 'p' + profile_name, profile_name)
+        await state.finish()
 
 async def on_list(message: types.Message):
     user_id = message.from_user.id
-    cursor.execute(
-        "SELECT name, creation_time FROM vpn_profiles WHERE user_id = ?", (user_id,))
-    profiles = cursor.fetchall()
+    async with Session(engine) as session:
+        user = await session.exec(select(User).where(User.telegram_id == user_id))
+        user = user.one_or_none()
 
-    if not profiles:
-        await message.reply("You have no VPN profiles.")
-        return
+        if not user:
+            await message.reply("User not found. Please use /start to initialize.")
+            return
 
-    profile_list = text("Your VPN profiles:")
-    for profile in profiles:
-        profile_list += text("\n- ", escape_md(profile[0])) + text(" created: ", escape_md(profile[1]), "\n")
+        profiles = await session.exec(select(VPNProfile).where(VPNProfile.user_id == user.user_id))
+        profiles = profiles.all()
 
-    await message.reply(profile_list, parse_mode=ParseMode.MARKDOWN)
+        if not profiles:
+            await message.reply("You have no VPN profiles.")
+            return
 
-# send config file to user when he send /get command
+        profile_list = "Your VPN profiles:\n"
+        for profile in profiles:
+            profile_list += f"- {markdown.escape_md(profile.name)} created: {profile.creation_time}\n"
+
+        await message.reply(profile_list, parse_mode=ParseMode.MARKDOWN)
+
 async def on_get(message: types.Message):
     user_id = message.from_user.id
     profile_name = message.text[5:].strip()
@@ -172,10 +162,8 @@ async def on_get(message: types.Message):
         await message.reply("Please provide the profile name you want to get after the /get command.")
         return
 
-    # name for wg is user_id + profile_name
     name_for_wg = str(user_id) + 'p' + profile_name
     await send_config(message, name_for_wg, profile_name)
-
 
 async def on_delete(message: types.Message):
     user_id = message.from_user.id
@@ -185,22 +173,20 @@ async def on_delete(message: types.Message):
         await message.reply("Please provide the profile name you want to delete after the /delete command.")
         return
 
-    cursor.execute(
-        "DELETE FROM vpn_profiles WHERE user_id = ? AND name = ?", (user_id, profile_name))
-    conn.commit()
+    async with Session(engine) as session:
+        profile = await session.exec(select(VPNProfile).where(VPNProfile.user_id == user_id, VPNProfile.name == profile_name))
+        profile = profile.one_or_none()
 
-    # name for wg is user_id + profile_name
-    name_for_wg = str(user_id) + 'p' + profile_name
-    # run command inside docker container
-    os.system(
-        f"docker exec -it wireguard /app/manage-peer remove {name_for_wg}")
+        if not profile:
+            await message.reply(f"VPN profile '{markdown.escape_md(profile_name)}' not found.", parse_mode=ParseMode.MARKDOWN)
+            return
 
-    if cursor.rowcount:
-        await message.reply(f"VPN profile '{escape_md(profile_name)}' deleted successfully.", parse_mode=ParseMode.MARKDOWN)
-    else:
-        await message.reply(f"VPN profile '{escape_md(profile_name)}' not found.", parse_mode=ParseMode.MARKDOWN)
+        session.delete(profile)
+        await session.commit()
 
-# regitster token for user
+        os.system(f"docker exec -it wireguard /app/manage-peer remove {user_id + 'p' + profile_name}")
+        await message.reply(f"VPN profile '{markdown.escape_md(profile_name)}' deleted successfully.", parse_mode=ParseMode.MARKDOWN)
+
 async def on_register(message: types.Message):
     user_id = message.from_user.id
     token = message.text[10:].strip()
@@ -208,211 +194,155 @@ async def on_register(message: types.Message):
     if not token:
         await message.reply("Please provide the token you want to register after the /register command.")
         return
-    
-    # get token from users database and check if it exists
-    cursor.execute( "SELECT token FROM users WHERE user_id=?", (user_id,))
-    user_token = cursor.fetchone()
 
-    if user_token:
-        await message.reply(f"You already have token: {user_token[0]}")
-        return
-    
-    # check if token is not NONE
-    if token == "NONE":
-        await message.reply(f"Token {token} not found.")
-        return
-    
-    # check if token exists in tokens database
-    cursor.execute( "SELECT token FROM users_tokens WHERE token=?", (token,))
-    token_exists = cursor.fetchone()
+    async with Session(engine) as session:
+        user = await session.exec(select(User).where(User.telegram_id == user_id))
+        user = user.one_or_none()
 
-    if not token_exists:
-        await message.reply(f"Token {token} not found.")
-        return
-    
-    # add token to users database
-    cursor.execute( "INSERT INTO users (user_id, token) VALUES (?, ?)", (user_id, token))
-    conn.commit()
+        if user and user.token:
+            await message.reply(f"You already have a token: {user.token}")
+            return
 
-    # get balance from tokens database
-    cursor.execute( "SELECT balance FROM users_tokens WHERE token=?", (token,))
-    balance = cursor.fetchone()
+        user_token = await session.exec(select(UserToken).where(UserToken.token == token))
+        user_token = user_token.one_or_none()
 
+        if not user_token:
+            await message.reply(f"Token {token} not found.")
+            return
 
-    await message.reply(f"Token {token} registered successfully.")
-    await message.reply(f"Your balance is {balance[0]}")
+        if not user:
+            user = User(telegram_id=user_id, token=token)
+        else:
+            user.token = token
 
+        session.add(user)
+        await session.commit()
 
-# remove token from user
+        await message.reply(f"Token {token} registered successfully. Your balance is {user_token.balance}")
+
 async def on_unregister(message: types.Message):
     user_id = message.from_user.id
 
-    # get token from users database and check if it exists
-    cursor.execute( "SELECT token FROM users WHERE user_id=?", (user_id,))
-    user_token = cursor.fetchone()
+    async with Session(engine) as session:
+        user = await session.exec(select(User).where(User.telegram_id == user_id))
+        user = user.one_or_none()
 
-    if not user_token:
-        await message.reply("You don't have any token.")
-        return
-    
-    # replace token with None in users database
-    cursor.execute( "UPDATE users SET token = ? WHERE user_id = ?", (None, user_id))
-    conn.commit()
+        if not user or not user.token:
+            await message.reply("You don't have any token.")
+            return
 
-    await message.reply(f"Token {user_token[0]} unregistered successfully.")
+        user.token = None
+        await session.commit()
 
-# get information about token and balance
+        await message.reply("Token unregistered successfully.")
+
 async def on_info(message: types.Message):
     user_id = message.from_user.id
 
-    # get token from users database and check if it exists
-    cursor.execute( "SELECT token FROM users WHERE user_id=?", (user_id,))
-    user_token = cursor.fetchone()
+    async with Session(engine) as session:
+        user = await session.exec(select(User).where(User.telegram_id == user_id))
+        user = user.one_or_none()
 
-    if not user_token:
-        await message.reply("You don't have any token.")
-        return
-    
-    # get balance from tokens database
-    cursor.execute( "SELECT balance FROM users_tokens WHERE token=?", (user_token[0],))
-    balance = cursor.fetchone()
+        if not user or not user.token:
+            await message.reply("You don't have any token.")
+            return
 
-    await message.reply(f"Your token is {user_token[0]}")
-    await message.reply(f"Your balance is {balance[0]}")
+        user_token = await session.exec(select(UserToken).where(UserToken.token == user.token))
+        user_token = user_token.one_or_none()
 
-# suspend user vpn profile
+        if not user_token:
+            await message.reply(f"Token not found.")
+            return
+
+        await message.reply(f"Token: {user.token}\nBalance: {user_token.balance}")
+
+async def on_balance(message: types.Message):
+    user_id = message.from_user.id
+
+    async with Session(engine) as session:
+        user = await session.exec(select(User).where(User.telegram_id == user_id))
+        user = user.one_or_none()
+
+        if not user or not user.token:
+            await message.reply("You don't have any token.")
+            return
+
+        user_token = await session.exec(select(UserToken).where(UserToken.token == user.token))
+        user_token = user_token.one_or_none()
+
+        if not user_token:
+            await message.reply(f"Token not found.")
+            return
+
+        await message.reply(f"Balance: {user_token.balance}")
+
+# Command handler to initiate the process of suspending a profile
 async def on_suspend(message: types.Message):
+    await message.reply("Please enter the profile name to suspend:")
+    await Form.profile_name.set()
+
+# Handler to receive the profile name for suspension
+@dp.message_handler(state=Form.profile_name)
+async def process_suspend_profile(message: types.Message, state: FSMContext):
+    profile_name = message.text.strip()
     user_id = message.from_user.id
-    profile_name = message.text[9:].strip()
 
-    if not profile_name:
-        await message.reply("Please provide the profile name you want to suspend after the /suspend command.")
-        return
-    
-    # check if this profile exists in vpn profiles database and status is active
-    cursor.execute( "SELECT status FROM vpn_profiles WHERE user_id = ? AND name = ?", (user_id, profile_name))
-    profile_status = cursor.fetchone()
+    async with Session(engine) as session:
+        profile = await session.exec(select(VPNProfile).where(VPNProfile.user_id == user_id, VPNProfile.name == profile_name))
+        profile = profile.one_or_none()
 
-    if not profile_status:
-        await message.reply(f"VPN profile '{escape_md(profile_name)}' not found.", parse_mode=ParseMode.MARKDOWN)
-        return
-    
-    if profile_status[0] == "suspended":
-        await message.reply(f"VPN profile '{escape_md(profile_name)}' already suspended.", parse_mode=ParseMode.MARKDOWN)
-        return
-    
-    # update status in vpn profiles database
-    cursor.execute( "UPDATE vpn_profiles SET status = ? WHERE user_id = ? AND name = ?", ("suspended", user_id, profile_name))
-    conn.commit()
+        if not profile:
+            await message.reply(f"VPN profile '{markdown.escape_md(profile_name)}' not found.", parse_mode=ParseMode.MARKDOWN)
+            await state.finish()
+            return
 
-    # name for wg is user_id + profile_name
-    name_for_wg = str(user_id) + 'p' + profile_name
+        profile.status = 'suspended'
+        await session.commit()
 
-    # run command inside docker container
-    os.system(
-        f"docker exec -it wireguard /app/manage-peer suspend {name_for_wg}")
+        os.system(f"docker exec -it wireguard /app/manage-peer suspend {user_id + 'p' + profile_name}")
+        await message.reply(f"VPN profile '{markdown.escape_md(profile_name)}' suspended successfully.", parse_mode=ParseMode.MARKDOWN)
+        await state.finish()
 
-    await message.reply(f"VPN profile '{escape_md(profile_name)}' suspended successfully.", parse_mode=ParseMode.MARKDOWN)
-
-# resume user vpn profile
+# Command handler to initiate the process of resuming a profile
 async def on_resume(message: types.Message):
+    await message.reply("Please enter the profile name to resume:")
+    await Form.profile_name.set()
+
+# Handler to receive the profile name for resumption
+@dp.message_handler(state=Form.profile_name)
+async def process_resume_profile(message: types.Message, state: FSMContext):
+    profile_name = message.text.strip()
     user_id = message.from_user.id
-    profile_name = message.text[8:].strip()
 
-    if not profile_name:
-        await message.reply("Please provide the profile name you want to resume after the /resume command.")
-        return
-    
-    # check if this profile exists in vpn profiles database and status is suspended
-    cursor.execute( "SELECT status FROM vpn_profiles WHERE user_id = ? AND name = ?", (user_id, profile_name))
-    profile_status = cursor.fetchone()
+    async with Session(engine) as session:
+        profile = await session.exec(select(VPNProfile).where(VPNProfile.user_id == user_id, VPNProfile.name == profile_name))
+        profile = profile.one_or_none()
 
-    if not profile_status:
-        await message.reply(f"VPN profile '{escape_md(profile_name)}' not found.", parse_mode=ParseMode.MARKDOWN)
-        return
-    
-    if profile_status[0] == "active":
-        await message.reply(f"VPN profile '{escape_md(profile_name)}' already active.", parse_mode=ParseMode.MARKDOWN)
-        return
-    
-    # update status in vpn profiles database
-    cursor.execute( "UPDATE vpn_profiles SET status = ? WHERE user_id = ? AND name = ?", ("active", user_id, profile_name))
-    conn.commit()
+        if not profile:
+            await message.reply(f"VPN profile '{markdown.escape_md(profile_name)}' not found.", parse_mode=ParseMode.MARKDOWN)
+            await state.finish()
+            return
 
-    # name for wg is user_id + profile_name
-    name_for_wg = str(user_id) + 'p' + profile_name
+        profile.status = 'active'
+        await session.commit()
 
-    # run command inside docker container
-    os.system(f"docker exec -it wireguard /app/manage-peer add {name_for_wg}")
+        os.system(f"docker exec -it wireguard /app/manage-peer resume {user_id + 'p' + profile_name}")
+        await message.reply(f"VPN profile '{markdown.escape_md(profile_name)}' resumed successfully.", parse_mode=ParseMode.MARKDOWN)
+        await state.finish()
 
-    await message.reply(f"VPN profile '{escape_md(profile_name)}' resumed successfully.", parse_mode=ParseMode.MARKDOWN)
+# Register message handlers
+dp.register_message_handler(on_start, commands=["start"])
+dp.register_message_handler(on_help, commands=["help"])
+dp.register_message_handler(on_add, commands=["add"], state="*")
+dp.register_message_handler(on_list, commands=["list"])
+dp.register_message_handler(on_get, commands=["get"])
+dp.register_message_handler(on_delete, commands=["delete"])
+dp.register_message_handler(on_register, commands=["register"])
+dp.register_message_handler(on_unregister, commands=["unregister"])
+dp.register_message_handler(on_info, commands=["info"])
+dp.register_message_handler(on_balance, commands=["balance"])
+dp.register_message_handler(on_suspend, commands=["suspend"], state="*")
+dp.register_message_handler(on_resume, commands=["resume"], state="*")
 
-dp.register_message_handler(on_start, commands=['start'])
-dp.register_message_handler(on_help, commands=['help'])
-dp.register_message_handler(on_add, commands=['add'])
-dp.register_message_handler(on_list, commands=['list'])
-dp.register_message_handler(on_delete, commands=['delete'])
-dp.register_message_handler(on_get, commands=['get'])
-dp.register_message_handler(on_register, commands=['register'])
-dp.register_message_handler(on_unregister, commands=['unregister'])
-dp.register_message_handler(on_info, commands=['info'])
-dp.register_message_handler(on_info, commands=['balance'])
-dp.register_message_handler(on_suspend, commands=['suspend'])
-dp.register_message_handler(on_resume, commands=['resume'])
-
-# handler for SIGINT and SIGTERM signals
-
-def signal_handler(sig, frame):
-    print('You pressed Ctrl+C!')
-    # stop docker container using docker compose
-    if os.system("docker compose down") == 0:
-        print("Docker container stopped")
-    else:
-        print("Failed to stop docker container")
-
-    import re
-    file_path = f"~/wg_config/.donoteditthisfile"
-    expanded_file_path = os.path.expanduser(file_path)
-
-    # Read the file
-    with open(expanded_file_path, "r") as file:
-        file_contents = file.read()
-
-        # Find the value of ORIG_PEERS using a regular expression
-        orig_peers_match = re.search(r"ORIG_PEERS=\"(.+?)\"", file_contents)
-        orig_peers = orig_peers_match.group(1) if orig_peers_match else None
-
-    # Print the value of ORIG_PEERS
-    if orig_peers:
-        print("ORIG_PEERS:", orig_peers)
-    else:
-        print("ORIG_PEERS not found")
-
-    # open docker-compose.yml using yaml library and update PEERS variable
-    with open("docker-compose.yml", "r") as f:
-        data = yaml.safe_load(f)
-
-        data['services']['wireguard']['environment'] = [
-            env_var if 'PEERS' not in env_var else f'PEERS={orig_peers}'
-            for env_var in data['services']['wireguard']['environment']
-        ]
-
-    # save updated docker-compose.yml file
-    with open("docker-compose.yml", "w") as f:
-        yaml.safe_dump(data, f)
-
-    sys.exit(0)
-
-
-signal.signal(signal.SIGINT, signal_handler)
-signal.signal(signal.SIGTERM, signal_handler)
-
-if __name__ == '__main__':
-    # start docker container in the background using docker compose
-    if os.system("docker compose up -d") == 0:
-        print("Docker container started")
-    else:
-        print("Failed to start docker container")
-        exit(1)
-
+if __name__ == "__main__":
     executor.start_polling(dp, skip_updates=True)

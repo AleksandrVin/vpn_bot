@@ -1,0 +1,21 @@
+[tool.poetry]
+name = "vpn-bot"
+version = "0.1.0"
+description = "Telegram bot for vpn access"
+authors = ["Aleksandr Vinogradov <vinogradov.alek@gmail.com>"]
+readme = "README.md"
+license = "GPL"
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "^3.10"
+aiogram = "^3.10.0"
+sqlmodel = "^0.0.21"
+
+[tool.poetry.group.dev.dependencies]
+black = "^24.8.0"
+isort = "^5.13.2"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
